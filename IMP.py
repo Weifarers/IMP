@@ -1,161 +1,40 @@
 from detrend import *
 import numpy as np
 import scipy as sp
-import time
 from scipy.linalg import eig
-import matplotlib.pyplot as plt
 
 
-def imp(file, svd_thresh, num_iter):
-    # Initializes a start time for the code, so we can time individual portions.
-    start_time = time.time()
-    # Gets the time series data.
-    time_data = file['Time']
-    # Gets the remaining values from the data.
-    val_data = file.iloc[:, 1:]
-    # Gets the signal labels.
-    signal_label = list(val_data)
-    # Applies the iterative matrix pencil method.
-    f_list, b_per, y_hat_data, detrend_data, cost_list, detrend_time, imp_time, iter_time = \
-        imp_method(time_data, val_data, signal_label, svd_thresh, num_iter)
-
-    return f_list, b_per, y_hat_data, time_data, val_data, detrend_data, cost_list, detrend_time, imp_time, iter_time, start_time
-
-
-def imp_method(time_series, val, label, svd_thresh, num_iter):
-    # Calls the Iterative Matrix Pencil method.
-    # Inputs: time - Time series
-    #         val - The data that you want to detrend.
-    #         label - The associated labels with each signal.
-    #         svd_thresh - The threshold used to filter the singular values.
-    #         num_iter - Number of iterations provided by user.
-    #         start_time - Initialization of starting time to time individual components of IMP.
-    # Outputs: f_list - List of all the modal frequencies.
-    #          b_per - List of all the damping percentages for the modal frequencies.
-    #          y_hat_data - DataFrame containing the reproduced data.
-    #          detrend_data - DataFrame containing the original data that was detrended.
-    #          cost_list - List containing all the cost functions for each signal.
-
-    # Getting some initial values to pass down to the other functions.
-    #   - num_data = number of data points per signal.
-    #   - num_signal = number of signals.
-    num_data = val.shape[0]
-    num_signal = val.shape[1]
-    # Also checks if the number of iterations is greater than the number of signals.
-    if num_iter > num_signal:
-        num_iter = num_signal
-    # Initializes some constants for later use.
-    eigs = {}
-    y_hat_data = pd.DataFrame()
-    y_hat_data_ns = pd.DataFrame()
-    iter_time = {}
-    # Initializes some total timers.
-    mp_total = 0
-    ms_total = 0
-    recon_total = 0
-    cf_total = 0
-
-    # Data Pre-processing
-    time_series = time_series - time_series[0]
-    # Gets the time step.
-    delta_t = time_series[1] - time_series[0]
-    detrend_data, lin_poly, std_list = lin_detrend(time_series, val, label)
-    # Transposes the result so each column is a signal.
-    detrend_data = detrend_data.transpose()
-    detrend_time = time.time()
-
-    # Iterative Matrix Pencil Method
-    # Initializes the data set we'll be applying the matrix pencil method to.
-    imp_data = pd.DataFrame()
-    # Sets the initial signal to be the first signal in the data set. This gives us flexibility in choosing
-    # our starting point.
-    initial_signal = detrend_data.iloc[:, 0]
-    imp_data[initial_signal.name] = initial_signal.values
-    for i in range(num_iter):
-        # Starts a timer for each iteration of the IMP method, along with a dictionary to store values.
-        iter_start = time.time()
-        # Sets a flag for use when checking cost functions.
-        in_imp = True
-        # Applies the matrix pencil method to the set of signals.
-        eigs = matrix_pencil(imp_data, svd_thresh)
-        # Times the matrix pencil method for each iteration.
-        matrix_pencil_time = time.time()
-        # Gets the mode shapes for all of the data.
-        mode_mag, mode_ang = mode_shapes(detrend_data, eigs)
-        # times how long it takes to get the mode shapes.
-        mode_shape_time = time.time()
-        # Reconstructs all of the data.
-        y_hat_data, y_hat_data_ns = imp_reproduce(mode_mag, mode_ang, eigs, delta_t, num_signal,
-                                                  num_data, time_series, lin_poly, std_list)
-        # Times how long it takes to reconstruct the data.
-        reconstruct_time = time.time()
-        # Gets the cost functions for all of the data.
-        cost_list = cost_function(detrend_data, y_hat_data_ns, num_signal, num_data)
-        # Times how long it takes to calculate the cost functions.
-        cost_time = time.time()
-        # Chooses the signal with the largest cost function.
-        max_cost = max(cost_list, key=lambda key: cost_list[key])
-        # Includes a conditional that checks whether or not the signal has already been included. If it has, move to the
-        # next highest one. We use a flag to keep this up until we've run out of signals.
-        while in_imp:
-            if max_cost in imp_data.keys():
-                del cost_list[max_cost]
-                # This is a check to see if the list is empty. If it isn't, which returns true, we can just get the
-                # next signal.
-                if bool(cost_list):
-                    max_cost = max(cost_list, key=lambda key: cost_list[key])
-                # If the list is empty, then we've taken the last signal, so nothing else has to be done and we
-                # can exit the loop.
-                else:
-                    in_imp = False
-            else:
-                in_imp = False
-        # Updates the imp_data list with that signal.
-        imp_data[max_cost] = pd.Series(detrend_data[max_cost].values)
-        # Generates a dictionary for each iteration that stores the times for each iteration.
-        iter_time[i+1] = {'Matrix Pencil': (matrix_pencil_time - iter_start),
-                          'Mode Shape Calculation': (mode_shape_time - matrix_pencil_time),
-                          'Reconstruction': (reconstruct_time - mode_shape_time),
-                          'Cost Function Calculation': (cost_time - reconstruct_time)}
-        # Updates the total values, and stores them in a separate key.
-        mp_total += (matrix_pencil_time - iter_start)
-        ms_total += (mode_shape_time - matrix_pencil_time)
-        recon_total += (reconstruct_time - mode_shape_time)
-        cf_total += (cost_time - reconstruct_time)
-    # Adds the 'Total' option as the last key in the dictionary.
-    iter_time['Total'] = {'Matrix Pencil': mp_total,
-                          'Mode Shape Calculation': ms_total,
-                          'Reconstruction': recon_total,
-                          'Cost Function Calculation': cf_total}
-    # Gets the frequencies and damping percentages associated with the last set of eigenvalues from IMP.
-    f_list, b_per = imp_mode_present(eigs, delta_t)
-    cost_list = cost_function(detrend_data, y_hat_data_ns, num_signal, num_data)
-    imp_time = time.time()
-    return f_list, b_per, y_hat_data, detrend_data, cost_list, detrend_time, imp_time, iter_time
-
-
-def matrix_pencil(y, svd_thresh):
-    # Calls the matrix pencil method.
-    # Inputs: y - Signal data.
-    #         svd_thresh - The threshold used to filter the singular values.
-    # Returns the eigenvalues of the matrix pair {Y2, Y1}
-    # Gets the N and L (pencil parameter) used to create the Hankel matrix.
-    num_data = y.shape[0]
+def matrix_pencil(num_data: int, imp_data: dict, svd_thresh: float):
+    """
+    This function applies the Matrix Pencil method to any given set of input data.
+    :param num_data: Integer containing the number of data points per signal.
+    :param imp_data: Dictionary containing the signals that we are passing through the Matrix Pencil method.
+    :param svd_thresh: Float that has the SVD threshold we will use to filter the singular values.
+    :return:
+    eigenvalues: np.ndarray that contains all the eigenvalues after the filtering process of the Matrix Pencil method.
+    """
+    # Using the number of data points per signal, gets the pencil parameter.
     l_val = np.floor(num_data / 2)
     l_val = l_val.astype(int)
+
     # Initializes an empty Hankel matrix.
     hankel = np.array(())
+
     # Creates a temporary Hankel matrix for every signal.
-    for column in y:
+    for column in imp_data:
         temp_hankel = np.zeros((num_data - l_val, l_val + 1))
         # Iterates through every row of the Hankel matrix.
         for j in range(num_data - l_val):
-            temp_hankel[j] = y[column][j:j + l_val + 1]
+            temp_hankel[j] = imp_data[column][j:j + l_val + 1]
         # Vertically stacks the Hankel matrices, to increase its' size with more signals.
         # The if statement is there to check for the first instance of the Hankel matrix, where the size is 0.
         hankel = np.vstack([hankel, temp_hankel]) if hankel.size else temp_hankel
 
-    # Takes a SVD of the Hankel matrix..
+    # Takes a SVD of the Hankel matrix. Note that in some versions of PyCharm or other IDEs, this might spit
+    # out a "Tuple assignment balance is incorrect" warning. I'm not entirely sure what the warning is meant
+    # to fend off, but I think this is a bug with some IDEs, so you can ignore it. This shouldn't pose a
+    # problem during the actual execution of the code.
+    # noinspection PyTupleAssignmentBalance
     u, s_val, vh = np.linalg.svd(hankel)
     # Converts vH into v.
     v = vh.conj().transpose()
@@ -183,19 +62,22 @@ def matrix_pencil(y, svd_thresh):
     y_2 = np.dot(v_2.transpose(), v_1)
 
     # Gets the eigenvalues of the matrix pair.
-    eigs = sp.linalg.eig(y_2, y_1)[0]
+    eigenvalues = sp.linalg.eig(y_2, y_1)[0]
 
-    return eigs
+    return eigenvalues
 
 
-def imp_mode_present(z, delta_t):
-    # Converts the discrete-time modes into continuous-time modes for presentation purposes.
-    # Note that when presenting the results, we ignore the complex conjugates, and only show the
-    # eigenvalues with positive complex component.
-    # Inputs: z - The eigenvalues of the matrix pair {Y2,Y1}.
-    #         delta_t - Time step between data points.
-    # Returns the modes by frequency and damping percentage.
-
+def imp_mode_present(z: np.ndarray, delta_t: float):
+    """
+    Converts the discrete-time modes into continuous-time modes for presentation purposes.
+    Note that when presenting the results, we ignore the complex conjugates, and only show the
+    eigenvalues with positive complex component.
+    :param z: Eigenvalues of the matrix pair {Y2, Y1}
+    :param delta_t: Time step between data points.
+    :return:
+    f_list: np.ndarray that has all the modal frequencies.
+    b_per: np.ndarray that has all the damping percentages.
+    """
     # Converts eigenvalues to continuous time ones.
     ct_lambda = np.log(z) / delta_t
     # Removes all complex conjugates with negative imaginary components.
@@ -207,11 +89,18 @@ def imp_mode_present(z, delta_t):
     return f_list, b_per
 
 
-def mode_shapes(y, z):
-    # Calculates the mode shapes associated with each signal.
-    # Inputs: y - Detrended data that was used to calculate the modes.
-    #         z - The eigenvalues of the matrix pair {Y2,Y1}.
-    # Returns the mode shapes split into two lists, magnitude and phase.
+def mode_shapes(y: pd.DataFrame, z: np.ndarray):
+    """
+    Calculates the mode shapes associated with each signal.
+    :param y: Detrended data that was used to calculate the modes.
+    :param z: Eigenvalues of the matrix pair {Y2, Y1}
+    :return:
+    mode_mag: pd.DataFrame containing all the magnitudes for each of the modes.
+    mode_theta: pd.DAtaFrame containing all the phase angles for each of the modes.
+    """
+    # Gets the names of all the signals.
+    names = y.columns
+    # Gets all the exponents for the construction of the Z matrix.
     exp = np.arange(y.shape[0])
     exp_col = np.asmatrix(exp).transpose()
     # Constructs the Z matrix.
@@ -222,78 +111,179 @@ def mode_shapes(y, z):
     mode_mag = np.absolute(mode_shape)
     mode_theta = np.angle(mode_shape)
 
+    # Builds the data into DataFrames.
+    mode_mag = pd.DataFrame(data=mode_mag, columns=names)
+    mode_theta = pd.DataFrame(data=mode_theta, columns=names)
+
     return mode_mag, mode_theta
 
 
-def imp_reproduce(mode_mag, mode_theta, z, delta_t, num_signal, num_data, time_series, lin_poly, std_list):
-    # Reproduces each of the signals given the set of modes.
-    # Inputs: mode_mag - The list of the magnitudes for each mode shape.
-    #         mode_theta - The list of the angles for each mode shape.
-    #         z - The eigenvalues of the matrix pair {Y2, Y1}.
-    #         delta_t - The time step between data points.
-    #         num_signal - The number of signals in your data set.
-    #         num_data - The number of data points per signal.
-    #         time_series - List of all time points.
-    #         lin_poly - List of linear polynomials used for data detrending.
-    #         std_list - List of standard deviations for each signal.
-    # Outputs: y_hat_data - Reproduced data, rescaled.
-    #          y_hat_data_ns - Reproduced data, but unscaled. This is used for cost function calculations.
+def imp_reproduce(z: np.ndarray, delta_t: float, trend: pd.DataFrame, std_list: pd.Series,
+                  time_series: pd.Series, num_data: int, mode_mag: pd.DataFrame, mode_theta: pd.DataFrame):
+    """
+    This function takes the eigenvalues and mode shapes, and reproduces all the signals.
+    :param z: np.ndarray containing all the eigenvalues from the Matrix Pencil method.
+    :param delta_t: Float telling us the time step between time points.
+    :param trend: pd.DataFrame containing all the coefficients of the detrending from
+    :param std_list: pd.Series containing the standard deviations of the detrended data.
+    :param time_series: pd.Series containing the time series data.
+    :param num_data: Integer containing the number of data points per signal.
+    :param mode_mag: pd.DataFrame containing the mode shape magnitudes for every mode and every signal.
+    :param mode_theta: pd.DataFrame containing the mode shape angles for every mode and every signal.
+    :return:
+    y_hat_data_ns_df: pd.DataFrame containing the reproduced data, but without the any of the detrending.
+    """
+
     # Converts poles to the modes of the signal, which contain the damping and frequency.
     ct_lambda = np.log(z) / delta_t
-    # Getting the number of modes.
-    num_modes = ct_lambda.shape[0]
+
     # Breaks down the lambda into its real (damping) and imaginary (angular frequency) components.
     b_list = np.real(ct_lambda)
     w_list = np.imag(ct_lambda)
-    # Initializing the data frame where we'll store the data.
-    y_hat_data = pd.DataFrame()
-    # Initializing another DataFrame where we store the unscaled data, so we can calculate the cost function.
-    y_hat_data_ns = pd.DataFrame()
-    for i in range(num_signal):
-        # Creates a name for each new signal.
-        signal_name = 'Signal ' + str(i + 1)
-        # Gets the standard deviation of the associated signal.
+
+    # Creates fixed matrices that we'll use in conjunction with matrix manipulation to solve for y_hat.
+    # Each matrix here is a N x M matrix, where N is the number of data points, and M is the number of modes.
+    # The goal is to evaluate the summation in y_hat by making each column it's own mode, and then summing
+    # across the columns.
+    b_mat = np.tile(b_list, (num_data, 1))
+    w_mat = np.tile(w_list, (num_data, 1))
+    # Creates a similar matrix for the time series data.
+    time_mat = np.tile(np.array([time_series.values]).transpose(), (1, len(b_list)))
+
+    # Initializes the cosine and exponential components, since they're the same values for all the signals.
+    exp_comp = np.exp(np.multiply(b_mat, time_mat))
+    cos_ang_comp = np.multiply(w_mat, time_mat)
+
+    # Initializes dictionaries to story the reproduced data.
+    y_hat_data_ns = {}
+
+    # Iteratively jumps through every row of the detrending DataFrame.
+    for trend_row in trend.itertuples():
+        # Gets the name of the signal, and the standard deviation associated with it.
+        signal_name = trend_row.Index
+
+        # Now we need the mode shapes for the particular signal of interest.
+        r_list = mode_mag[signal_name]
+        theta_list = mode_theta[signal_name]
+
+        # We convert these into matrices, similar to how we did the modes.
+        r_mat = np.tile(r_list, (num_data, 1))
+        theta_mat = np.tile(theta_list, (num_data, 1))
+
+        # Then we expand upon our original exponential and cosine component.
+        temp_exp = np.multiply(r_mat, exp_comp)
+        temp_cos = np.cos(np.add(cos_ang_comp, theta_mat))
+
+        # Then evaluate the function to get y_hat.
+        y_hat_temp = np.multiply(temp_exp, temp_cos)
+
+        # Sums along the columns.
+        y_hat_temp = y_hat_temp.sum(axis=1)
+
+        # Stores the unscaled data so we can use it to calculate the cost function for each signal.
+        y_hat_data_ns[signal_name] = y_hat_temp
+
+    y_hat_data_ns_df = pd.DataFrame(y_hat_data_ns)
+
+    return y_hat_data_ns_df
+
+
+def imp_reproduce_final(z: np.ndarray, delta_t: float, trend: pd.DataFrame, std_list: pd.Series,
+                        time_series: pd.Series, num_data: int, mode_mag: pd.DataFrame, mode_theta: pd.DataFrame):
+    """
+    This function differs from IMP reproduce, by only reproducing all the data as it originally was. This is only
+    necessary *after* the IMP method is done, since before then, we compare the detrended data. So to save on
+    computation time, instead of reproducing the data fully during the IMP, we just wait until the end. The code
+    is functionally almost exactly the same as the imp_reproduce() function.
+    :param z: np.ndarray containing all the eigenvalues from the Matrix Pencil method.
+    :param delta_t: Float telling us the time step between time points.
+    :param trend: pd.DataFrame containing all the coefficients of the detrending from
+    :param std_list: pd.Series containing the standard deviations of the detrended data.
+    :param time_series: pd.Series containing the time series data.
+    :param num_data: Integer containing the number of data points per signal.
+    :param mode_mag: pd.DataFrame containing the mode shape magnitudes for every mode and every signal.
+    :param mode_theta: pd.DataFrame containing the mode shape angles for every mode and every signal.
+    :return:
+    y_hat_data_df: pd.DataFrame containing the reproduced data, y_hat.
+    """
+
+    # Converts poles to the modes of the signal, which contain the damping and frequency.
+    ct_lambda = np.log(z) / delta_t
+
+    # Breaks down the lambda into its real (damping) and imaginary (angular frequency) components.
+    b_list = np.real(ct_lambda)
+    w_list = np.imag(ct_lambda)
+
+    # Creates fixed matrices that we'll use in conjunction with matrix manipulation to solve for y_hat.
+    # Each matrix here is a N x M matrix, where N is the number of data points, and M is the number of modes.
+    # The goal is to evaluate the summation in y_hat by making each column it's own mode, and then summing
+    # across the columns.
+    b_mat = np.tile(b_list, (num_data, 1))
+    w_mat = np.tile(w_list, (num_data, 1))
+    # Creates a similar matrix for the time series data.
+    time_mat = np.tile(np.array([time_series.values]).transpose(), (1, len(b_list)))
+
+    # Initializes the cosine and exponential components, since they're the same values for all the signals.
+    exp_comp = np.exp(np.multiply(b_mat, time_mat))
+    cos_ang_comp = np.multiply(w_mat, time_mat)
+
+    # Initializes dictionaries to story the reproduced data.
+    y_hat_data = {}
+
+    # Iteratively jumps through every row of the detrending DataFrame.
+    for trend_row in trend.itertuples():
+        # Gets the name of the signal, and the standard deviation associated with it.
+        signal_name = trend_row.Index
         curr_std = std_list[signal_name]
-        # Gets the detrend associated with the signal as well.
-        curr_detrend = lin_poly[:, i]
-        # Evaluates the detrend.
-        detrend_data = curr_detrend[1] * time_series + curr_detrend[0]
-        # Initializes a temporary y_hat that we'll use to store the results.
-        y_hat_temp = np.zeros((num_data, 1))
-        # Iterating through each mode.
-        for j in range(num_modes):
-            # The data is split into two components, an exponential one and a cosine one.
-            exp_comp = mode_mag[j, i] * np.exp(b_list[j] * time_series)
-            cos_comp = np.cos(np.add(w_list[j] * time_series, mode_theta[j, i]))
-            # Gets the values, and forces them into a shape such that you can combine them.
-            exp_comp = exp_comp.values
-            exp_comp = exp_comp.reshape((num_data, 1))
-            cos_comp = cos_comp.values
-            cos_comp = cos_comp.reshape((num_data, 1))
-            # We update the values every iteration.
-            y_hat_temp = np.add(y_hat_temp, np.multiply(exp_comp, cos_comp))
+        # The remaining information stored in the row are the coefficients of the polynomial fit.
+        poly_func = np.array(list(trend_row[1:]))
+        # Evaluates the detrended polynomial over the time series.
+        detrend_eval = np.polynomial.polynomial.polyval(time_series, poly_func)
+
+        # Now we need the mode shapes for the particular signal of interest.
+        r_list = mode_mag[signal_name]
+        theta_list = mode_theta[signal_name]
+
+        # We convert these into matrices, similar to how we did the modes.
+        r_mat = np.tile(r_list, (num_data, 1))
+        theta_mat = np.tile(theta_list, (num_data, 1))
+
+        # Then we expand upon our original exponential and cosine component.
+        temp_exp = np.multiply(r_mat, exp_comp)
+        temp_cos = np.cos(np.add(cos_ang_comp, theta_mat))
+
+        # Then evaluate the function to get y_hat.
+        y_hat_temp = np.multiply(temp_exp, temp_cos)
+
+        # Sums along the columns.
+        y_hat_temp = y_hat_temp.sum(axis=1)
 
         # Adds this data to our entire reconstructed data set. Note that here we scale the data by the standard
         # deviation and add back in the detrend, effectively reversing what we had initially done to the data set.
-        y_hat_data[signal_name] = curr_std * pd.Series(y_hat_temp.transpose()[0]) + detrend_data
-        # Stores the unscaled data so we can use it to calculate the cost function for each signal.
-        y_hat_data_ns[signal_name] = pd.Series(y_hat_temp.transpose()[0])
-    return y_hat_data, y_hat_data_ns
+        y_hat_data[signal_name] = np.add((curr_std * y_hat_temp), detrend_eval)
+
+    # We then convert everything back into DataFrames for later use.
+    y_hat_data_df = pd.DataFrame(y_hat_data)
+
+    return y_hat_data_df
 
 
-def cost_function(y, y_hat, num_signal, num_data):
-    # Initializes a dictionary to store the cost functions.
-    cost_list = {}
-    # For each signal in our system, calculate the cost function. There's probably a faster way of
-    # doing this via matrices, tbh.
-    for i in range(num_signal):
-        # Gets a signal name.
-        signal_name = 'Signal ' + str(i + 1)
-        # Calculates the residual.
-        residual = np.subtract(y[signal_name], y_hat[signal_name])
-        # Calculates the cost function.
-        temp_cost = np.linalg.norm(residual) / num_data
-        # Adds this cost function to the list.
-        cost_list[signal_name] = temp_cost
 
-    return cost_list
+
+
+def cost_function(y: pd.DataFrame, y_hat: pd.DataFrame, num_data: int):
+    """
+    Calculates the cost functions for each signal.
+    :param y: Original data gathered from transient stability.
+    :param y_hat: Reproduced data from the matrix pencil method.
+    :param num_data: Number of the data points in the system.
+    :return: cost_dict: Dictionary that contains the cost function for each signal.
+    """
+    # Takes the difference between the original data and the reproduced data.
+    residual = y - y_hat
+    # Applies a norm function over each column of the residual, and then divides it by the number of data points.
+    cost = np.linalg.norm(residual, axis=0)**2 / (2*num_data)
+    # Constructs a dictionary where each key is the bus, and the value is the associated cost function.
+    cost_dict = dict(zip(residual.columns, cost))
+
+    return cost_dict
