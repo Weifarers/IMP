@@ -1,5 +1,5 @@
 # Iterative Matrix Pencil Method - Python Version
-Last Updated: July 25, 2022
+Last Updated: July 26, 2022
 
 This is a Python implementation of the Iterative Matrix Pencil Method, found [here.](https://scholarspace.manoa.hawaii.edu/server/api/core/bitstreams/17ec96d0-925a-4752-ac55-e7a83d97fe65/content)
 
